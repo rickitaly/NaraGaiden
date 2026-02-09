@@ -1,6 +1,7 @@
 # usage: python nara_web.py --host 0.0.0.0 --port 8888 --adb-device emulator-5554
 
 import argparse
+from datetime import date, timedelta
 import html
 import json
 import logging
@@ -17,6 +18,23 @@ from nara_live_export import (
     adb_pull,
     collect_live_data,
 )
+
+
+GLOBAL_CSS = """
+@import url("https://fonts.googleapis.com/css2?family=Mystery+Quest&family=Slackey&display=swap");
+:root {
+  --font-body: "Mystery Quest", "Noto Sans", cursive;
+  --font-display: "Slackey", "Mystery Quest", cursive;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #0b0b0b;
+  color: #f2f2f2;
+  font-family: var(--font-body);
+}
+""".strip()
 
 
 def format_relative(ms, now_ms=None):
@@ -276,7 +294,10 @@ def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
       </tbody>
     </table>
     <div class=\"actions\">
-      <button class=\"btn\" onclick=\"openCleanWindow()\">Open Window</button>
+      <div class=\"action-buttons\">
+        <button class=\"btn\" onclick=\"openCleanWindow()\">Open Window</button>
+        <a class=\"btn\" href=\"/milk\">Milk Totals</a>
+      </div>
       <div class=\"meta\">as of {html.escape(generated)}</div>
     </div>
     """.strip()
@@ -284,15 +305,9 @@ def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
 
 def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="", vitamins=None):
     body_html = build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins)
-    css = """
-    @import url("https://fonts.googleapis.com/css2?family=Mystery+Quest&family=Slackey&display=swap");
+    css = (GLOBAL_CSS + """
     @view-transition { navigation: auto; }
-    * { box-sizing: border-box; }
     body {
-      margin: 0;
-      min-height: 100vh;
-      background: #0b0b0b;
-      color: #f2f2f2;
       display: flex;
       justify-content: center;
       align-items: center;
@@ -303,7 +318,6 @@ def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="
     .container {
       width: min(98vw, 1600px);
       padding: clamp(8px, 1.6vw, 24px);
-      font-family: "Mystery Quest", "Noto Sans", cursive;
     }
     .meta {
       color: #a3a3a3;
@@ -316,6 +330,11 @@ def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="
       align-items: center;
       margin-top: clamp(8px, 1.2vw, 16px);
     }
+    .action-buttons {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
     .btn {
       appearance: none;
       border: 1px solid #2a2a2a;
@@ -325,6 +344,8 @@ def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="
       font-size: clamp(12px, 1vw + 6px, 16px);
       border-radius: 6px;
       cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
     }
     .btn:hover { background: #1b1b1b; }
     table {
@@ -342,7 +363,7 @@ def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="
     th {
       background: #333;
       text-align: center;
-      font-family: "Slackey", "Mystery Quest", cursive;
+      font-family: var(--font-display);
       font-weight: 400;
       font-size: clamp(14px, 1.8vw + 8px, 36px);
     }
@@ -353,7 +374,7 @@ def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="
     .col-feed-time { width: 26%; }
     .col-diaper-type { width: 12%; }
     .col-diaper-time { width: 26%; }
-    """.strip()
+    """).strip()
     script = """
     let lastSuccessMs = Date.now();
     let staleActive = false;
@@ -476,6 +497,502 @@ def build_json(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
     }
 
 
+def normalize_milk_to_ml(volume, unit):
+    if volume is None:
+        return None
+    normalized = str(unit or "ML").strip().upper()
+    if normalized in {"ML", "MILLILITER", "MILLILITERS"}:
+        return float(volume)
+    if normalized in {"L", "LITER", "LITERS"}:
+        return float(volume) * 1000.0
+    if normalized in {"OZ", "FL OZ", "FLOZ", "FL_OZ"}:
+        return float(volume) * 29.5735
+    return None
+
+
+def _trim_milk_series(daily_points, cumulative_points):
+    first_nonzero_idx = None
+    for idx, value in enumerate(daily_points):
+        if value > 0:
+            first_nonzero_idx = idx
+            break
+
+    if first_nonzero_idx is None:
+        return None, None
+
+    daily_display = []
+    cumulative_display = []
+    for idx, daily_value in enumerate(daily_points):
+        cumulative_value = cumulative_points[idx]
+        if idx < first_nonzero_idx:
+            daily_display.append(None)
+            if idx == first_nonzero_idx - 1:
+                cumulative_display.append(0.0)
+            else:
+                cumulative_display.append(None)
+            continue
+        daily_display.append(round(daily_value, 1))
+        cumulative_display.append(round(cumulative_value, 1))
+
+    return daily_display, cumulative_display
+
+
+def milk_totals_by_day(events, child_map):
+    by_child_day = {}
+    day_keys = set()
+    skipped_units = 0
+    for ev in events:
+        if ev.get("trackGroupKey") != "FEED":
+            continue
+        child_key = ev.get("childKey")
+        begin_dt = ev.get("beginDt")
+        if not child_key or begin_dt is None:
+            continue
+        payload = ev.get("payload") or {}
+        volume, unit = bottle_volume(payload)
+        if volume is None:
+            continue
+        volume_ml = normalize_milk_to_ml(volume, unit)
+        if volume_ml is None:
+            skipped_units += 1
+            continue
+        day_key = time.strftime("%Y-%m-%d", time.localtime(int(begin_dt) / 1000.0))
+        child_days = by_child_day.setdefault(child_key, {})
+        child_days[day_key] = child_days.get(day_key, 0.0) + volume_ml
+        day_keys.add(day_key)
+
+    if not day_keys:
+        return {
+            "labels": [],
+            "series": [],
+            "skippedUnits": skipped_units,
+        }
+
+    start_day = date.fromisoformat(min(day_keys))
+    end_day = date.fromisoformat(max(day_keys))
+    labels = []
+    cursor = start_day
+    while cursor <= end_day:
+        labels.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+
+    palette = [
+        "#d93025",
+        "#1e88e5",
+        "#0f9d58",
+        "#f9ab00",
+        "#8e24aa",
+        "#00897b",
+        "#6d4c41",
+        "#5e35b1",
+    ]
+
+    series = []
+    for idx, child_key in enumerate(
+        sorted(by_child_day.keys(), key=lambda key: (child_map.get(key) or key).lower())
+    ):
+        day_totals = by_child_day.get(child_key, {})
+        running_total = 0.0
+        daily_points = []
+        cumulative_points = []
+        for day_key in labels:
+            daily_value = day_totals.get(day_key, 0.0)
+            running_total += daily_value
+            daily_points.append(daily_value)
+            cumulative_points.append(running_total)
+
+        daily_display, cumulative_display = _trim_milk_series(daily_points, cumulative_points)
+        if daily_display is None or cumulative_display is None:
+            continue
+
+        series.append(
+            {
+                "label": child_map.get(child_key) or child_key,
+                "daily": daily_display,
+                "cumulative": cumulative_display,
+                "borderColor": palette[idx % len(palette)],
+                "backgroundColor": palette[idx % len(palette)],
+            }
+        )
+
+    return {
+        "labels": labels,
+        "series": series,
+        "skippedUnits": skipped_units,
+    }
+
+
+def build_milk_html(events, child_map, generated_at):
+    chart_data = milk_totals_by_day(events, child_map)
+    chart_data_json = json.dumps(chart_data, separators=(",", ":"))
+    generated = time.strftime("%Y-%m-%d %H:%M", time.localtime(generated_at / 1000))
+    css = (GLOBAL_CSS + """
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 16px;
+    }
+    .container {
+      width: min(98vw, 1600px);
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      background: #111;
+      padding: clamp(10px, 1.4vw, 20px);
+    }
+    h1 {
+      margin: 0 0 8px 0;
+      font-family: var(--font-display);
+      font-weight: 400;
+      font-size: clamp(20px, 2.2vw, 38px);
+    }
+    .subtitle {
+      margin: 0;
+      color: #bdbdbd;
+      font-size: clamp(13px, 1vw + 8px, 18px);
+    }
+    .actions {
+      margin: 14px 0;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid #2a2a2a;
+      background: #1a1a1a;
+      color: #f2f2f2;
+      padding: 8px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      text-decoration: none;
+      font-size: clamp(12px, 1vw + 6px, 16px);
+    }
+    .btn:hover { background: #222; }
+    .mode-select {
+      border: 1px solid #2a2a2a;
+      background: #1a1a1a;
+      color: #f2f2f2;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: clamp(12px, 1vw + 6px, 16px);
+    }
+    .smoothing {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: min(420px, 100%);
+    }
+    .smooth-slider {
+      width: min(240px, 45vw);
+      accent-color: #1e88e5;
+    }
+    .smooth-slider:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .chart-wrap {
+      position: relative;
+      min-height: 58vh;
+      height: min(70vh, 760px);
+    }
+    .chart-wrap canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+    .meta {
+      color: #9e9e9e;
+      margin-top: 10px;
+      font-size: clamp(12px, 1vw + 6px, 16px);
+    }
+    .warn {
+      color: #ffb74d;
+      margin-top: 8px;
+      font-size: clamp(12px, 1vw + 6px, 16px);
+    }
+    """).strip()
+    script = f"""
+    const payload = {chart_data_json};
+    const labels = payload.labels || [];
+    const series = payload.series || [];
+
+    function movingAverage(values, windowSize) {{
+      if (windowSize <= 1) {{
+        return values.slice();
+      }}
+      const radius = Math.floor(windowSize / 2);
+      const output = new Array(values.length).fill(null);
+      for (let idx = 0; idx < values.length; idx += 1) {{
+        if (values[idx] == null) {{
+          continue;
+        }}
+        let sum = 0;
+        let count = 0;
+        const left = Math.max(0, idx - radius);
+        const right = Math.min(values.length - 1, idx + radius);
+        for (let cursor = left; cursor <= right; cursor += 1) {{
+          const value = values[cursor];
+          if (value == null) {{
+            continue;
+          }}
+          sum += value;
+          count += 1;
+        }}
+        output[idx] = count ? Number((sum / count).toFixed(1)) : null;
+      }}
+      return output;
+    }}
+
+    function buildDatasets(mode, smoothWindow) {{
+      return series.map((entry) => {{
+        const raw = mode === "cumulative" ? entry.cumulative : entry.daily;
+        const data = mode === "daily" ? movingAverage(raw, smoothWindow) : raw;
+        return {{
+          label: entry.label,
+          data,
+          borderColor: entry.borderColor,
+          backgroundColor: entry.backgroundColor,
+          pointRadius: 1,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          tension: 0.2,
+          spanGaps: false,
+        }};
+      }});
+    }}
+
+    function yAxisTitle(mode, smoothWindow) {{
+      if (mode === "cumulative") {{
+        return "Cumulative milk eaten (mL)";
+      }}
+      if (smoothWindow <= 1) {{
+        return "Milk eaten per day (mL)";
+      }}
+      return `Milk eaten per day (mL, ${{smoothWindow}}-day moving avg)`;
+    }}
+
+    function smoothingText(mode, smoothWindow) {{
+      if (mode !== "daily") {{
+        return "Smoothing disabled in cumulative mode";
+      }}
+      if (smoothWindow <= 1) {{
+        return "Smoothing: off";
+      }}
+      return `Smoothing: ${{smoothWindow}}-day moving average`;
+    }}
+
+    function updateSmoothingLabel(mode, smoothWindow) {{
+      const textEl = document.getElementById("smooth-window-value");
+      if (!textEl) {{
+        return;
+      }}
+      textEl.textContent = smoothingText(mode, smoothWindow);
+    }}
+
+    function updateVisibleRange(chart) {{
+      const textEl = document.getElementById("visible-range");
+      if (!textEl || !labels.length) {{
+        return;
+      }}
+      const xScale = chart.scales.x;
+      const minIdx = Math.max(0, Math.ceil(xScale.min ?? 0));
+      const maxIdx = Math.min(labels.length - 1, Math.floor(xScale.max ?? labels.length - 1));
+      textEl.textContent = `Visible range: ${{labels[minIdx]}} to ${{labels[maxIdx]}}`;
+    }}
+
+    const canvas = document.getElementById("milk-chart");
+    const noData = document.getElementById("no-data");
+    const chartWrap = document.querySelector(".chart-wrap");
+    const modeSelect = document.getElementById("series-mode");
+    const smoothSlider = document.getElementById("smooth-window");
+    let chart = null;
+    if (!labels.length || !series.length) {{
+      if (chartWrap) {{
+        chartWrap.style.display = "none";
+      }}
+      if (noData) {{
+        noData.hidden = false;
+      }}
+      updateSmoothingLabel("daily", 1);
+      if (smoothSlider) {{
+        smoothSlider.disabled = true;
+      }}
+    }} else {{
+      const initialMode = "daily";
+      const initialSmoothWindow = 1;
+      chart = new Chart(canvas, {{
+        type: "line",
+        data: {{
+          labels,
+          datasets: buildDatasets(initialMode, initialSmoothWindow),
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {{
+            mode: "nearest",
+            intersect: false,
+          }},
+          plugins: {{
+            legend: {{
+              labels: {{ color: "#f2f2f2" }},
+            }},
+            tooltip: {{
+              callbacks: {{
+                label: (context) => {{
+                  const mode = context.chart.$mode === "cumulative" ? "cumulative" : "daily";
+                  const windowSize = context.chart.$smoothWindow || 1;
+                  const suffix = mode === "daily" && windowSize > 1 ? `, ${{windowSize}}d MA` : "";
+                  return `${{context.dataset.label}}: ${{context.parsed.y.toFixed(1)}} mL (${{mode}}${{suffix}})`;
+                }},
+              }},
+            }},
+            zoom: {{
+              pan: {{
+                enabled: true,
+                mode: "x",
+                modifierKey: "shift",
+              }},
+              zoom: {{
+                mode: "x",
+                wheel: {{ enabled: true }},
+                pinch: {{ enabled: true }},
+                drag: {{
+                  enabled: true,
+                  backgroundColor: "rgba(30, 136, 229, 0.2)",
+                  borderColor: "rgba(30, 136, 229, 0.9)",
+                  borderWidth: 1,
+                }},
+                onZoomComplete: ({{ chart }}) => updateVisibleRange(chart),
+              }},
+              onPanComplete: ({{ chart }}) => updateVisibleRange(chart),
+            }},
+          }},
+          scales: {{
+            x: {{
+              ticks: {{ color: "#d2d2d2", maxTicksLimit: 12 }},
+              grid: {{ color: "rgba(255,255,255,0.08)" }},
+              title: {{ display: true, color: "#d2d2d2", text: "Day" }},
+            }},
+            y: {{
+              ticks: {{ color: "#d2d2d2" }},
+              grid: {{ color: "rgba(255,255,255,0.08)" }},
+              title: {{ display: true, color: "#d2d2d2", text: yAxisTitle(initialMode, initialSmoothWindow) }},
+            }},
+          }},
+        }},
+      }});
+      chart.$mode = initialMode;
+      chart.$smoothWindow = initialSmoothWindow;
+      if (modeSelect) {{
+        modeSelect.value = initialMode;
+      }}
+      if (smoothSlider) {{
+        smoothSlider.value = String(initialSmoothWindow);
+        smoothSlider.disabled = false;
+      }}
+      updateSmoothingLabel(initialMode, initialSmoothWindow);
+      updateVisibleRange(chart);
+    }}
+
+    if (modeSelect) {{
+      modeSelect.addEventListener("change", (event) => {{
+        if (!chart) {{
+          return;
+        }}
+        const nextMode = event.target.value === "cumulative" ? "cumulative" : "daily";
+        chart.$mode = nextMode;
+        if (smoothSlider) {{
+          smoothSlider.disabled = nextMode !== "daily";
+        }}
+        chart.data.datasets = buildDatasets(nextMode, chart.$smoothWindow || 1);
+        chart.options.scales.y.title.text = yAxisTitle(nextMode, chart.$smoothWindow || 1);
+        chart.update();
+        updateSmoothingLabel(nextMode, chart.$smoothWindow || 1);
+        updateVisibleRange(chart);
+      }});
+    }}
+
+    if (smoothSlider) {{
+      smoothSlider.addEventListener("input", (event) => {{
+        const nextWindow = Math.max(1, Number.parseInt(event.target.value, 10) || 1);
+        updateSmoothingLabel(chart ? chart.$mode : "daily", nextWindow);
+        if (!chart) {{
+          return;
+        }}
+        chart.$smoothWindow = nextWindow;
+        if (chart.$mode !== "daily") {{
+          return;
+        }}
+        chart.data.datasets = buildDatasets(chart.$mode, chart.$smoothWindow);
+        chart.options.scales.y.title.text = yAxisTitle(chart.$mode, chart.$smoothWindow);
+        chart.update("none");
+      }});
+    }}
+
+    document.getElementById("reset-zoom").addEventListener("click", () => {{
+      if (!chart) {{
+        return;
+      }}
+      chart.resetZoom();
+      updateVisibleRange(chart);
+    }});
+    """.strip()
+
+    warn_html = ""
+    if chart_data.get("skippedUnits"):
+        warn_html = (
+            f"<div class=\"warn\">Skipped {int(chart_data['skippedUnits'])} feed entries with unsupported units.</div>"
+        )
+
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Nara Milk Totals</title>
+  <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\" />
+  <style>
+    {css}
+  </style>
+</head>
+<body>
+  <div class=\"container\">
+    <h1>Milk Totals</h1>
+    <p class=\"subtitle\">Showing daily totals by default. Use the mode picker and smoothing slider to adjust the view. Drag horizontally to zoom; hold Shift and drag to pan.</p>
+    <div class=\"actions\">
+      <a class=\"btn\" href=\"/\">Back to Main View</a>
+      <select id=\"series-mode\" class=\"mode-select\" aria-label=\"Series mode\">
+        <option value=\"daily\" selected>Daily Total</option>
+        <option value=\"cumulative\">Cumulative Total</option>
+      </select>
+      <div class=\"smoothing\">
+        <label for=\"smooth-window\" class=\"subtitle\">Smoothing</label>
+        <input id=\"smooth-window\" class=\"smooth-slider\" type=\"range\" min=\"1\" max=\"21\" step=\"1\" value=\"1\" />
+        <span id=\"smooth-window-value\" class=\"subtitle\">Smoothing: off</span>
+      </div>
+      <button id=\"reset-zoom\" class=\"btn\" type=\"button\">Reset Zoom</button>
+      <span id=\"visible-range\" class=\"subtitle\"></span>
+    </div>
+    <div class=\"chart-wrap\">
+      <canvas id=\"milk-chart\"></canvas>
+    </div>
+    <div id=\"no-data\" class=\"subtitle\" hidden>No bottle milk data found yet.</div>
+    <div class=\"meta\">as of {html.escape(generated)}</div>
+    {warn_html}
+  </div>
+  <script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js\"></script>
+  <script src=\"https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js\"></script>
+  <script src=\"https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js\"></script>
+  <script>
+    {script}
+  </script>
+</body>
+</html>
+"""
+
+
 class NaraServer(HTTPServer):
     adb_path: str
     adb_device: Optional[str]
@@ -518,7 +1035,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if parsed.path not in ("/", "/index.html", "/json"):
+        if parsed.path not in ("/", "/index.html", "/json", "/milk", "/milk.html"):
             self.send_response(404)
             self.end_headers()
             return
@@ -542,6 +1059,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body_bytes)))
+                self.end_headers()
+                self.wfile.write(body_bytes)
+                return
+
+            if parsed.path in ("/milk", "/milk.html"):
+                html_body = build_milk_html(
+                    data.get("events", []),
+                    data.get("children", {}),
+                    generated_at,
+                )
+                body_bytes = html_body.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body_bytes)))
                 self.end_headers()
                 self.wfile.write(body_bytes)
