@@ -537,8 +537,16 @@ def _trim_milk_series(daily_points, cumulative_points):
     return daily_display, cumulative_display
 
 
+def is_night_hour(hour, night_start_hour):
+    night_end_hour = (night_start_hour + 12) % 24
+    if night_start_hour < night_end_hour:
+        return night_start_hour <= hour < night_end_hour
+    return hour >= night_start_hour or hour < night_end_hour
+
+
 def milk_totals_by_day(events, child_map):
     by_child_day = {}
+    by_child_day_hour = {}
     day_keys = set()
     skipped_units = 0
     for ev in events:
@@ -556,9 +564,14 @@ def milk_totals_by_day(events, child_map):
         if volume_ml is None:
             skipped_units += 1
             continue
-        day_key = time.strftime("%Y-%m-%d", time.localtime(int(begin_dt) / 1000.0))
+        begin_local = time.localtime(int(begin_dt) / 1000.0)
+        day_key = time.strftime("%Y-%m-%d", begin_local)
+        hour = begin_local.tm_hour
         child_days = by_child_day.setdefault(child_key, {})
         child_days[day_key] = child_days.get(day_key, 0.0) + volume_ml
+        child_day_hours = by_child_day_hour.setdefault(child_key, {})
+        day_hours = child_day_hours.setdefault(day_key, {})
+        day_hours[hour] = day_hours.get(hour, 0.0) + volume_ml
         day_keys.add(day_key)
 
     if not day_keys:
@@ -592,6 +605,7 @@ def milk_totals_by_day(events, child_map):
         sorted(by_child_day.keys(), key=lambda key: (child_map.get(key) or key).lower())
     ):
         day_totals = by_child_day.get(child_key, {})
+        day_hour_totals = by_child_day_hour.get(child_key, {})
         running_total = 0.0
         daily_points = []
         cumulative_points = []
@@ -605,11 +619,61 @@ def milk_totals_by_day(events, child_map):
         if daily_display is None or cumulative_display is None:
             continue
 
+        split = {}
+        for night_start_hour in range(24):
+            day_daily_points = []
+            day_cumulative_points = []
+            day_running_total = 0.0
+            night_daily_points = []
+            night_cumulative_points = []
+            night_running_total = 0.0
+            for day_key in labels:
+                hour_totals = day_hour_totals.get(day_key, {})
+                day_value = 0.0
+                night_value = 0.0
+                for hour, amount in hour_totals.items():
+                    if is_night_hour(hour, night_start_hour):
+                        night_value += amount
+                    else:
+                        day_value += amount
+
+                day_running_total += day_value
+                day_daily_points.append(day_value)
+                day_cumulative_points.append(day_running_total)
+                night_running_total += night_value
+                night_daily_points.append(night_value)
+                night_cumulative_points.append(night_running_total)
+
+            day_daily_display, day_cumulative_display = _trim_milk_series(
+                day_daily_points, day_cumulative_points
+            )
+            night_daily_display, night_cumulative_display = _trim_milk_series(
+                night_daily_points, night_cumulative_points
+            )
+            if day_daily_display is None or day_cumulative_display is None:
+                day_daily_display = [None] * len(labels)
+                day_cumulative_display = [None] * len(labels)
+            if night_daily_display is None or night_cumulative_display is None:
+                night_daily_display = [None] * len(labels)
+                night_cumulative_display = [None] * len(labels)
+
+            split[str(night_start_hour)] = {
+                "day": {
+                    "daily": day_daily_display,
+                    "cumulative": day_cumulative_display,
+                },
+                "night": {
+                    "daily": night_daily_display,
+                    "cumulative": night_cumulative_display,
+                },
+            }
+
         series.append(
             {
                 "label": child_map.get(child_key) or child_key,
                 "daily": daily_display,
                 "cumulative": cumulative_display,
+                "split": split,
                 "borderColor": palette[idx % len(palette)],
                 "backgroundColor": palette[idx % len(palette)],
             }
@@ -618,6 +682,7 @@ def milk_totals_by_day(events, child_map):
     return {
         "labels": labels,
         "series": series,
+        "defaultNightStart": 20,
         "skippedUnits": skipped_units,
     }
 
@@ -626,6 +691,12 @@ def build_milk_html(events, child_map, generated_at):
     chart_data = milk_totals_by_day(events, child_map)
     chart_data_json = json.dumps(chart_data, separators=(",", ":"))
     generated = time.strftime("%Y-%m-%d %H:%M", time.localtime(generated_at / 1000))
+    default_night_start = int(chart_data.get("defaultNightStart", 20))
+    night_start_options = []
+    for hour in range(24):
+        selected = " selected" if hour == default_night_start else ""
+        night_start_options.append(f"<option value=\"{hour}\"{selected}>{hour:02d}:00</option>")
+    night_start_options_html = "\n        ".join(night_start_options)
     css = (GLOBAL_CSS + """
     body {
       display: flex;
@@ -678,6 +749,22 @@ def build_milk_html(events, child_map, generated_at):
       border-radius: 6px;
       font-size: clamp(12px, 1vw + 6px, 16px);
     }
+    .mode-select:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .toggle-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #f2f2f2;
+      font-size: clamp(12px, 1vw + 6px, 16px);
+      cursor: pointer;
+      padding: 2px 0;
+    }
+    .toggle-label input {
+      accent-color: #1e88e5;
+    }
     .smoothing {
       display: flex;
       align-items: center;
@@ -716,6 +803,21 @@ def build_milk_html(events, child_map, generated_at):
     const payload = {chart_data_json};
     const labels = payload.labels || [];
     const series = payload.series || [];
+    const defaultNightStart = Number(payload.defaultNightStart ?? 20);
+    const hiddenSeriesKeys = new Set();
+
+    function hourLabel(hour) {{
+      return `${{String(hour).padStart(2, "0")}}:00`;
+    }}
+
+    function splitWindowText(nightStartHour) {{
+      const endHour = (nightStartHour + 12) % 24;
+      return `${{hourLabel(nightStartHour)}} to ${{hourLabel(endHour)}}`;
+    }}
+
+    function hasAnyValue(values) {{
+      return Array.isArray(values) && values.some((value) => value != null);
+    }}
 
     function movingAverage(values, windowSize) {{
       if (windowSize <= 1) {{
@@ -744,32 +846,84 @@ def build_milk_html(events, child_map, generated_at):
       return output;
     }}
 
-    function buildDatasets(mode, smoothWindow) {{
-      return series.map((entry) => {{
-        const raw = mode === "cumulative" ? entry.cumulative : entry.daily;
-        const data = mode === "daily" ? movingAverage(raw, smoothWindow) : raw;
-        return {{
-          label: entry.label,
-          data,
-          borderColor: entry.borderColor,
-          backgroundColor: entry.backgroundColor,
-          pointRadius: 1,
-          pointHoverRadius: 4,
-          borderWidth: 2,
-          tension: 0.2,
-          spanGaps: false,
-        }};
-      }});
+    function splitSeriesValues(entry, mode, nightStartHour, period) {{
+      const splitByHour = entry.split || {{}};
+      const split = splitByHour[String(nightStartHour)] || null;
+      if (!split || !split[period]) {{
+        return [];
+      }}
+      return mode === "cumulative" ? (split[period].cumulative || []) : (split[period].daily || []);
     }}
 
-    function yAxisTitle(mode, smoothWindow) {{
+    function buildDatasets(mode, smoothWindow, splitEnabled, nightStartHour) {{
+      const datasets = [];
+      series.forEach((entry) => {{
+        if (!splitEnabled) {{
+          const raw = mode === "cumulative" ? entry.cumulative : entry.daily;
+          const data = mode === "daily" ? movingAverage(raw, smoothWindow) : raw;
+          if (!hasAnyValue(data)) {{
+            return;
+          }}
+          const customKey = `single:${{entry.label}}`;
+          datasets.push({{
+            label: entry.label,
+            customKey,
+            data,
+            borderColor: entry.borderColor,
+            backgroundColor: entry.backgroundColor,
+            pointRadius: 1,
+            pointHoverRadius: 4,
+            borderWidth: 2,
+            tension: 0.2,
+            spanGaps: false,
+            hidden: hiddenSeriesKeys.has(customKey),
+          }});
+          return;
+        }}
+
+        const periodSpecs = [
+          {{ period: "day", label: "Day", dash: [] }},
+          {{ period: "night", label: "Night", dash: [8, 5] }},
+        ];
+        periodSpecs.forEach((spec) => {{
+          const raw = splitSeriesValues(entry, mode, nightStartHour, spec.period);
+          const data = mode === "daily" ? movingAverage(raw, smoothWindow) : raw;
+          if (!hasAnyValue(data)) {{
+            return;
+          }}
+          const customKey = `split:${{entry.label}}:${{spec.period}}`;
+          datasets.push({{
+            label: `${{entry.label}} (${{spec.label}})`,
+            customKey,
+            data,
+            borderColor: entry.borderColor,
+            backgroundColor: entry.backgroundColor,
+            borderDash: spec.dash,
+            pointRadius: 1,
+            pointHoverRadius: 4,
+            borderWidth: 2,
+            tension: 0.2,
+            spanGaps: false,
+            hidden: hiddenSeriesKeys.has(customKey),
+          }});
+        }});
+      }});
+      return datasets;
+    }}
+
+    function yAxisTitle(mode, smoothWindow, splitEnabled, nightStartHour) {{
+      let baseTitle = "";
       if (mode === "cumulative") {{
-        return "Cumulative milk eaten (mL)";
+        baseTitle = "Cumulative milk eaten (mL)";
+      }} else if (smoothWindow <= 1) {{
+        baseTitle = "Milk eaten per day (mL)";
+      }} else {{
+        baseTitle = `Milk eaten per day (mL, ${{smoothWindow}}-day moving avg)`;
       }}
-      if (smoothWindow <= 1) {{
-        return "Milk eaten per day (mL)";
+      if (!splitEnabled) {{
+        return baseTitle;
       }}
-      return `Milk eaten per day (mL, ${{smoothWindow}}-day moving avg)`;
+      return `${{baseTitle}} (Day/Night split, night ${{splitWindowText(nightStartHour)}})`;
     }}
 
     function smoothingText(mode, smoothWindow) {{
@@ -782,12 +936,44 @@ def build_milk_html(events, child_map, generated_at):
       return `Smoothing: ${{smoothWindow}}-day moving average`;
     }}
 
+    function splitText(splitEnabled, nightStartHour) {{
+      if (!splitEnabled) {{
+        return "Split: off";
+      }}
+      return `Split: on (night ${{splitWindowText(nightStartHour)}})`;
+    }}
+
+    function tooltipTitle(items) {{
+      if (!items || !items.length) {{
+        return "";
+      }}
+      const idx = items[0].dataIndex;
+      const dayKey = labels[idx] || "";
+      if (!dayKey) {{
+        return "";
+      }}
+      const dayDate = new Date(`${{dayKey}}T00:00:00`);
+      if (Number.isNaN(dayDate.getTime())) {{
+        return dayKey;
+      }}
+      const weekday = dayDate.toLocaleDateString(undefined, {{ weekday: "long" }});
+      return `${{dayKey}} (${{weekday}})`;
+    }}
+
     function updateSmoothingLabel(mode, smoothWindow) {{
       const textEl = document.getElementById("smooth-window-value");
       if (!textEl) {{
         return;
       }}
       textEl.textContent = smoothingText(mode, smoothWindow);
+    }}
+
+    function updateSplitLabel(splitEnabled, nightStartHour) {{
+      const textEl = document.getElementById("day-night-value");
+      if (!textEl) {{
+        return;
+      }}
+      textEl.textContent = splitText(splitEnabled, nightStartHour);
     }}
 
     function updateVisibleRange(chart) {{
@@ -801,11 +987,51 @@ def build_milk_html(events, child_map, generated_at):
       textEl.textContent = `Visible range: ${{labels[minIdx]}} to ${{labels[maxIdx]}}`;
     }}
 
+    function updateControlStates(mode, splitEnabled, modeSelect, smoothSlider, splitToggle, nightStartSelect) {{
+      if (modeSelect) {{
+        modeSelect.disabled = false;
+      }}
+      if (smoothSlider) {{
+        smoothSlider.disabled = mode !== "daily";
+      }}
+      if (splitToggle) {{
+        splitToggle.disabled = false;
+      }}
+      if (nightStartSelect) {{
+        nightStartSelect.disabled = !splitEnabled;
+      }}
+    }}
+
+    function applyHiddenSeriesState(targetChart) {{
+      if (!targetChart) {{
+        return;
+      }}
+      targetChart.data.datasets.forEach((dataset, idx) => {{
+        const key = dataset.customKey || dataset.label || String(idx);
+        targetChart.setDatasetVisibility(idx, !hiddenSeriesKeys.has(key));
+      }});
+    }}
+
     const canvas = document.getElementById("milk-chart");
     const noData = document.getElementById("no-data");
     const chartWrap = document.querySelector(".chart-wrap");
     const modeSelect = document.getElementById("series-mode");
     const smoothSlider = document.getElementById("smooth-window");
+    const splitToggle = document.getElementById("split-day-night");
+    const nightStartSelect = document.getElementById("night-start-hour");
+
+    function currentNightStart() {{
+      const raw = Number.parseInt(nightStartSelect ? nightStartSelect.value : String(defaultNightStart), 10);
+      if (Number.isNaN(raw)) {{
+        return defaultNightStart;
+      }}
+      return Math.max(0, Math.min(23, raw));
+    }}
+
+    function currentSplitEnabled() {{
+      return Boolean(splitToggle && splitToggle.checked);
+    }}
+
     let chart = null;
     if (!labels.length || !series.length) {{
       if (chartWrap) {{
@@ -814,18 +1040,30 @@ def build_milk_html(events, child_map, generated_at):
       if (noData) {{
         noData.hidden = false;
       }}
-      updateSmoothingLabel("daily", 1);
+      if (modeSelect) {{
+        modeSelect.disabled = true;
+      }}
       if (smoothSlider) {{
         smoothSlider.disabled = true;
       }}
+      if (splitToggle) {{
+        splitToggle.disabled = true;
+      }}
+      if (nightStartSelect) {{
+        nightStartSelect.disabled = true;
+      }}
+      updateSmoothingLabel("daily", 1);
+      updateSplitLabel(false, defaultNightStart);
     }} else {{
       const initialMode = "daily";
       const initialSmoothWindow = 1;
+      const initialSplitEnabled = false;
+      const initialNightStart = defaultNightStart;
       chart = new Chart(canvas, {{
         type: "line",
         data: {{
           labels,
-          datasets: buildDatasets(initialMode, initialSmoothWindow),
+          datasets: buildDatasets(initialMode, initialSmoothWindow, initialSplitEnabled, initialNightStart),
         }},
         options: {{
           responsive: true,
@@ -837,14 +1075,33 @@ def build_milk_html(events, child_map, generated_at):
           plugins: {{
             legend: {{
               labels: {{ color: "#f2f2f2" }},
+              onClick: (event, legendItem, legend) => {{
+                const targetChart = legend.chart;
+                const idx = legendItem.datasetIndex;
+                if (idx == null) {{
+                  return;
+                }}
+                const dataset = targetChart.data.datasets[idx];
+                const key = (dataset && (dataset.customKey || dataset.label)) || String(idx);
+                const currentlyVisible = targetChart.isDatasetVisible(idx);
+                if (currentlyVisible) {{
+                  hiddenSeriesKeys.add(key);
+                }} else {{
+                  hiddenSeriesKeys.delete(key);
+                }}
+                targetChart.setDatasetVisibility(idx, !currentlyVisible);
+                targetChart.update();
+              }},
             }},
             tooltip: {{
               callbacks: {{
+                title: (items) => tooltipTitle(items),
                 label: (context) => {{
                   const mode = context.chart.$mode === "cumulative" ? "cumulative" : "daily";
                   const windowSize = context.chart.$smoothWindow || 1;
-                  const suffix = mode === "daily" && windowSize > 1 ? `, ${{windowSize}}d MA` : "";
-                  return `${{context.dataset.label}}: ${{context.parsed.y.toFixed(1)}} mL (${{mode}}${{suffix}})`;
+                  const smoothSuffix = mode === "daily" && windowSize > 1 ? `, ${{windowSize}}d MA` : "";
+                  const splitSuffix = context.chart.$splitEnabled ? ", split" : "";
+                  return `${{context.dataset.label}}: ${{context.parsed.y.toFixed(1)}} mL (${{mode}}${{smoothSuffix}}${{splitSuffix}})`;
                 }},
               }},
             }},
@@ -878,21 +1135,50 @@ def build_milk_html(events, child_map, generated_at):
             y: {{
               ticks: {{ color: "#d2d2d2" }},
               grid: {{ color: "rgba(255,255,255,0.08)" }},
-              title: {{ display: true, color: "#d2d2d2", text: yAxisTitle(initialMode, initialSmoothWindow) }},
+              title: {{ display: true, color: "#d2d2d2", text: yAxisTitle(initialMode, initialSmoothWindow, initialSplitEnabled, initialNightStart) }},
             }},
           }},
         }},
       }});
       chart.$mode = initialMode;
       chart.$smoothWindow = initialSmoothWindow;
+      chart.$splitEnabled = initialSplitEnabled;
+      chart.$nightStart = initialNightStart;
       if (modeSelect) {{
         modeSelect.value = initialMode;
       }}
       if (smoothSlider) {{
         smoothSlider.value = String(initialSmoothWindow);
-        smoothSlider.disabled = false;
       }}
+      if (splitToggle) {{
+        splitToggle.checked = initialSplitEnabled;
+      }}
+      if (nightStartSelect) {{
+        nightStartSelect.value = String(initialNightStart);
+      }}
+      updateControlStates(initialMode, initialSplitEnabled, modeSelect, smoothSlider, splitToggle, nightStartSelect);
       updateSmoothingLabel(initialMode, initialSmoothWindow);
+      updateSplitLabel(initialSplitEnabled, initialNightStart);
+      updateVisibleRange(chart);
+    }}
+
+    function refreshChart(animationMode) {{
+      if (!chart) {{
+        return;
+      }}
+      const mode = chart.$mode || "daily";
+      const smoothWindow = chart.$smoothWindow || 1;
+      const splitEnabled = currentSplitEnabled();
+      const nightStart = currentNightStart();
+      chart.$splitEnabled = splitEnabled;
+      chart.$nightStart = nightStart;
+      updateControlStates(mode, splitEnabled, modeSelect, smoothSlider, splitToggle, nightStartSelect);
+      chart.data.datasets = buildDatasets(mode, smoothWindow, splitEnabled, nightStart);
+      applyHiddenSeriesState(chart);
+      chart.options.scales.y.title.text = yAxisTitle(mode, smoothWindow, splitEnabled, nightStart);
+      chart.update(animationMode);
+      updateSmoothingLabel(mode, smoothWindow);
+      updateSplitLabel(splitEnabled, nightStart);
       updateVisibleRange(chart);
     }}
 
@@ -901,33 +1187,32 @@ def build_milk_html(events, child_map, generated_at):
         if (!chart) {{
           return;
         }}
-        const nextMode = event.target.value === "cumulative" ? "cumulative" : "daily";
-        chart.$mode = nextMode;
-        if (smoothSlider) {{
-          smoothSlider.disabled = nextMode !== "daily";
-        }}
-        chart.data.datasets = buildDatasets(nextMode, chart.$smoothWindow || 1);
-        chart.options.scales.y.title.text = yAxisTitle(nextMode, chart.$smoothWindow || 1);
-        chart.update();
-        updateSmoothingLabel(nextMode, chart.$smoothWindow || 1);
-        updateVisibleRange(chart);
+        chart.$mode = event.target.value === "cumulative" ? "cumulative" : "daily";
+        refreshChart();
       }});
     }}
 
     if (smoothSlider) {{
       smoothSlider.addEventListener("input", (event) => {{
         const nextWindow = Math.max(1, Number.parseInt(event.target.value, 10) || 1);
-        updateSmoothingLabel(chart ? chart.$mode : "daily", nextWindow);
         if (!chart) {{
+          updateSmoothingLabel("daily", nextWindow);
           return;
         }}
         chart.$smoothWindow = nextWindow;
-        if (chart.$mode !== "daily") {{
-          return;
-        }}
-        chart.data.datasets = buildDatasets(chart.$mode, chart.$smoothWindow);
-        chart.options.scales.y.title.text = yAxisTitle(chart.$mode, chart.$smoothWindow);
-        chart.update("none");
+        refreshChart("none");
+      }});
+    }}
+
+    if (splitToggle) {{
+      splitToggle.addEventListener("change", () => {{
+        refreshChart("none");
+      }});
+    }}
+
+    if (nightStartSelect) {{
+      nightStartSelect.addEventListener("change", () => {{
+        refreshChart("none");
       }});
     }}
 
@@ -960,13 +1245,22 @@ def build_milk_html(events, child_map, generated_at):
 <body>
   <div class=\"container\">
     <h1>Milk Totals</h1>
-    <p class=\"subtitle\">Showing daily totals by default. Use the mode picker and smoothing slider to adjust the view. Drag horizontally to zoom; hold Shift and drag to pan.</p>
+    <p class=\"subtitle\">Showing daily totals by default. Toggle Day/Night split to compare 12-hour windows; choose when night starts (default 20:00). Drag horizontally to zoom; hold Shift and drag to pan.</p>
     <div class=\"actions\">
       <a class=\"btn\" href=\"/\">Back to Main View</a>
       <select id=\"series-mode\" class=\"mode-select\" aria-label=\"Series mode\">
         <option value=\"daily\" selected>Daily Total</option>
         <option value=\"cumulative\">Cumulative Total</option>
       </select>
+      <label class=\"toggle-label\" for=\"split-day-night\">
+        <input id=\"split-day-night\" type=\"checkbox\" />
+        Day/Night Split
+      </label>
+      <label for=\"night-start-hour\" class=\"subtitle\">Night starts</label>
+      <select id=\"night-start-hour\" class=\"mode-select\" aria-label=\"Night start hour\">
+        {night_start_options_html}
+      </select>
+      <span id=\"day-night-value\" class=\"subtitle\">Split: off</span>
       <div class=\"smoothing\">
         <label for=\"smooth-window\" class=\"subtitle\">Smoothing</label>
         <input id=\"smooth-window\" class=\"smooth-slider\" type=\"range\" min=\"1\" max=\"21\" step=\"1\" value=\"1\" />
