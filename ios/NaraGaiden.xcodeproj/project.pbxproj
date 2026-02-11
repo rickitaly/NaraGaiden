@@ -12,6 +12,8 @@
 		0A59259C2F2FFC89006CB177 /* NaraGaidenExtensionExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0A5925862F2FFC86006CB177 /* NaraGaidenExtensionExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0A5925AC2F2FFCB9006CB177 /* NaraAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A5925AA2F2FFCB9006CB177 /* NaraAPI.swift */; };
 		0A5925AD2F2FFCB9006CB177 /* NaraAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A5925AA2F2FFCB9006CB177 /* NaraAPI.swift */; };
+		0A7800692F3270720046F40C /* NaraStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A7800682F3270720046F40C /* NaraStyle.swift */; };
+		0A78006A2F3270720046F40C /* NaraStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A7800682F3270720046F40C /* NaraStyle.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -44,6 +46,7 @@
 		0A5925882F2FFC86006CB177 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		0A59258A2F2FFC86006CB177 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		0A5925AA2F2FFCB9006CB177 /* NaraAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NaraAPI.swift; sourceTree = "<group>"; };
+		0A7800682F3270720046F40C /* NaraStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NaraStyle.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -135,6 +138,7 @@
 			isa = PBXGroup;
 			children = (
 				0A5925AA2F2FFCB9006CB177 /* NaraAPI.swift */,
+				0A7800682F3270720046F40C /* NaraStyle.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -249,6 +253,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0A5925AC2F2FFCB9006CB177 /* NaraAPI.swift in Sources */,
+				0A7800692F3270720046F40C /* NaraStyle.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -257,6 +262,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0A5925AD2F2FFCB9006CB177 /* NaraAPI.swift in Sources */,
+				0A78006A2F3270720046F40C /* NaraStyle.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
