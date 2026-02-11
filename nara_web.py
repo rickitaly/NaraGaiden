@@ -512,10 +512,12 @@ def normalize_milk_to_ml(volume, unit):
 
 def _trim_milk_series(daily_points, cumulative_points):
     first_nonzero_idx = None
+    last_nonzero_idx = None
     for idx, value in enumerate(daily_points):
         if value > 0:
-            first_nonzero_idx = idx
-            break
+            if first_nonzero_idx is None:
+                first_nonzero_idx = idx
+            last_nonzero_idx = idx
 
     if first_nonzero_idx is None:
         return None, None
@@ -524,7 +526,7 @@ def _trim_milk_series(daily_points, cumulative_points):
     cumulative_display = []
     for idx, daily_value in enumerate(daily_points):
         cumulative_value = cumulative_points[idx]
-        if idx < first_nonzero_idx:
+        if idx < first_nonzero_idx or idx > cast(int, last_nonzero_idx):
             daily_display.append(None)
             if idx == first_nonzero_idx - 1:
                 cumulative_display.append(0.0)
@@ -815,11 +817,21 @@ def build_milk_html(events, child_map, generated_at):
       return `${{hourLabel(nightStartHour)}} to ${{hourLabel(endHour)}}`;
     }}
 
+    function localDayKey(dateValue) {{
+      const year = dateValue.getFullYear();
+      const month = String(dateValue.getMonth() + 1).padStart(2, "0");
+      const day = String(dateValue.getDate()).padStart(2, "0");
+      return `${{year}}-${{month}}-${{day}}`;
+    }}
+
+    const todayLabel = localDayKey(new Date());
+    const todayIndex = labels.indexOf(todayLabel);
+
     function hasAnyValue(values) {{
       return Array.isArray(values) && values.some((value) => value != null);
     }}
 
-    function movingAverage(values, windowSize) {{
+    function movingAverage(values, windowSize, partialDayIndex) {{
       if (windowSize <= 1) {{
         return values.slice();
       }}
@@ -834,6 +846,9 @@ def build_milk_html(events, child_map, generated_at):
         const left = Math.max(0, idx - radius);
         const right = Math.min(values.length - 1, idx + radius);
         for (let cursor = left; cursor <= right; cursor += 1) {{
+          if (partialDayIndex >= 0 && cursor === partialDayIndex && idx !== partialDayIndex) {{
+            continue;
+          }}
           const value = values[cursor];
           if (value == null) {{
             continue;
@@ -860,7 +875,7 @@ def build_milk_html(events, child_map, generated_at):
       series.forEach((entry) => {{
         if (!splitEnabled) {{
           const raw = mode === "cumulative" ? entry.cumulative : entry.daily;
-          const data = mode === "daily" ? movingAverage(raw, smoothWindow) : raw;
+          const data = mode === "daily" ? movingAverage(raw, smoothWindow, todayIndex) : raw;
           if (!hasAnyValue(data)) {{
             return;
           }}
@@ -887,7 +902,7 @@ def build_milk_html(events, child_map, generated_at):
         ];
         periodSpecs.forEach((spec) => {{
           const raw = splitSeriesValues(entry, mode, nightStartHour, spec.period);
-          const data = mode === "daily" ? movingAverage(raw, smoothWindow) : raw;
+          const data = mode === "daily" ? movingAverage(raw, smoothWindow, todayIndex) : raw;
           if (!hasAnyValue(data)) {{
             return;
           }}
