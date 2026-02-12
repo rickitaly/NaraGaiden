@@ -31,6 +31,9 @@ but you might not want to broadcast your babies' data to the Internet.
   (based on routine tracking)
 * Automatically updates every minute
 
+Open with `chrome --app=http://192.168.2.1:8888`
+to get a window with no location bar or other chrome.
+
 ## Quick Start
 
 1. Install [Android Studio](https://developer.android.com/studio).
