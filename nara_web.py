@@ -296,7 +296,7 @@ def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
     <div class=\"actions\">
       <div class=\"action-buttons\">
         <button class=\"btn\" onclick=\"openCleanWindow()\">Open Window</button>
-        <a class=\"btn\" href=\"/milk\">Milk Totals</a>
+        <a class=\"btn\" href=\"/plot\">Plots</a>
       </div>
       <div class=\"meta\">as of {html.escape(generated)}</div>
     </div>
@@ -539,6 +539,27 @@ def _trim_milk_series(daily_points, cumulative_points):
     return daily_display, cumulative_display
 
 
+def _trim_optional_series(values, decimals=1):
+    first_idx = None
+    last_idx = None
+    for idx, value in enumerate(values):
+        if value is not None:
+            if first_idx is None:
+                first_idx = idx
+            last_idx = idx
+
+    if first_idx is None or last_idx is None:
+        return None
+
+    output = []
+    for idx, value in enumerate(values):
+        if idx < first_idx or idx > last_idx or value is None:
+            output.append(None)
+            continue
+        output.append(round(float(value), decimals))
+    return output
+
+
 def is_night_hour(hour, night_start_hour):
     night_end_hour = (night_start_hour + 12) % 24
     if night_start_hour < night_end_hour:
@@ -549,6 +570,9 @@ def is_night_hour(hour, night_start_hour):
 def milk_totals_by_day(events, child_map):
     by_child_day = {}
     by_child_day_hour = {}
+    feed_times_by_child = {}
+    gap_stats_by_child_day = {}
+    gap_stats_by_child_day_hour = {}
     day_keys = set()
     skipped_units = 0
     for ev in events:
@@ -558,6 +582,14 @@ def milk_totals_by_day(events, child_map):
         begin_dt = ev.get("beginDt")
         if not child_key or begin_dt is None:
             continue
+        begin_dt = int(begin_dt)
+        begin_local = time.localtime(begin_dt / 1000.0)
+        day_key = time.strftime("%Y-%m-%d", begin_local)
+        day_keys.add(day_key)
+
+        child_feed_times = feed_times_by_child.setdefault(child_key, [])
+        child_feed_times.append(begin_dt)
+
         payload = ev.get("payload") or {}
         volume, unit = bottle_volume(payload)
         if volume is None:
@@ -566,15 +598,38 @@ def milk_totals_by_day(events, child_map):
         if volume_ml is None:
             skipped_units += 1
             continue
-        begin_local = time.localtime(int(begin_dt) / 1000.0)
-        day_key = time.strftime("%Y-%m-%d", begin_local)
         hour = begin_local.tm_hour
         child_days = by_child_day.setdefault(child_key, {})
         child_days[day_key] = child_days.get(day_key, 0.0) + volume_ml
         child_day_hours = by_child_day_hour.setdefault(child_key, {})
         day_hours = child_day_hours.setdefault(day_key, {})
         day_hours[hour] = day_hours.get(hour, 0.0) + volume_ml
-        day_keys.add(day_key)
+
+    for child_key, feed_times in feed_times_by_child.items():
+        if len(feed_times) < 2:
+            continue
+        feed_times.sort()
+        prev_dt = feed_times[0]
+        for current_dt in feed_times[1:]:
+            if current_dt <= prev_dt:
+                prev_dt = current_dt
+                continue
+            gap_hours = (current_dt - prev_dt) / 3600000.0
+            gap_day_key = time.strftime("%Y-%m-%d", time.localtime(current_dt / 1000.0))
+            gap_hour = time.localtime(current_dt / 1000.0).tm_hour
+            child_gap_stats = gap_stats_by_child_day.setdefault(child_key, {})
+            stat = child_gap_stats.setdefault(gap_day_key, {"sum": 0.0, "count": 0, "max": 0.0})
+            stat["sum"] += gap_hours
+            stat["count"] += 1
+            stat["max"] = max(float(stat["max"]), gap_hours)
+
+            child_gap_hour_stats = gap_stats_by_child_day_hour.setdefault(child_key, {})
+            day_hour_stats = child_gap_hour_stats.setdefault(gap_day_key, {})
+            hour_stat = day_hour_stats.setdefault(gap_hour, {"sum": 0.0, "count": 0, "max": 0.0})
+            hour_stat["sum"] += gap_hours
+            hour_stat["count"] += 1
+            hour_stat["max"] = max(float(hour_stat["max"]), gap_hours)
+            prev_dt = current_dt
 
     if not day_keys:
         return {
@@ -603,23 +658,46 @@ def milk_totals_by_day(events, child_map):
     ]
 
     series = []
-    for idx, child_key in enumerate(
-        sorted(by_child_day.keys(), key=lambda key: (child_map.get(key) or key).lower())
-    ):
+    series_child_keys = sorted(
+        set(by_child_day.keys()) | set(gap_stats_by_child_day.keys()),
+        key=lambda key: (child_map.get(key) or key).lower(),
+    )
+    for idx, child_key in enumerate(series_child_keys):
         day_totals = by_child_day.get(child_key, {})
         day_hour_totals = by_child_day_hour.get(child_key, {})
+        child_gap_stats = gap_stats_by_child_day.get(child_key, {})
+        child_gap_hour_stats = gap_stats_by_child_day_hour.get(child_key, {})
+
         running_total = 0.0
         daily_points = []
         cumulative_points = []
+        max_gap_points = []
+        avg_gap_points = []
         for day_key in labels:
             daily_value = day_totals.get(day_key, 0.0)
             running_total += daily_value
             daily_points.append(daily_value)
             cumulative_points.append(running_total)
 
+            gap_stat = child_gap_stats.get(day_key)
+            if gap_stat and gap_stat.get("count", 0) > 0:
+                max_gap_points.append(float(gap_stat.get("max", 0.0)))
+                avg_gap_points.append(float(gap_stat.get("sum", 0.0)) / float(gap_stat.get("count", 1)))
+            else:
+                max_gap_points.append(None)
+                avg_gap_points.append(None)
+
         daily_display, cumulative_display = _trim_milk_series(daily_points, cumulative_points)
         if daily_display is None or cumulative_display is None:
-            continue
+            daily_display = [None] * len(labels)
+            cumulative_display = [None] * len(labels)
+
+        max_gap_display = _trim_optional_series(max_gap_points, decimals=2)
+        avg_gap_display = _trim_optional_series(avg_gap_points, decimals=2)
+        if max_gap_display is None:
+            max_gap_display = [None] * len(labels)
+        if avg_gap_display is None:
+            avg_gap_display = [None] * len(labels)
 
         split = {}
         for night_start_hour in range(24):
@@ -629,6 +707,10 @@ def milk_totals_by_day(events, child_map):
             night_daily_points = []
             night_cumulative_points = []
             night_running_total = 0.0
+            day_gap_max_points = []
+            day_gap_avg_points = []
+            night_gap_max_points = []
+            night_gap_avg_points = []
             for day_key in labels:
                 hour_totals = day_hour_totals.get(day_key, {})
                 day_value = 0.0
@@ -646,6 +728,33 @@ def milk_totals_by_day(events, child_map):
                 night_daily_points.append(night_value)
                 night_cumulative_points.append(night_running_total)
 
+                gap_hour_stats = child_gap_hour_stats.get(day_key, {})
+                day_gap_sum = 0.0
+                day_gap_count = 0
+                day_gap_max = None
+                night_gap_sum = 0.0
+                night_gap_count = 0
+                night_gap_max = None
+                for hour, stat in gap_hour_stats.items():
+                    gap_sum = float(stat.get("sum", 0.0))
+                    gap_count = int(stat.get("count", 0))
+                    gap_max = float(stat.get("max", 0.0))
+                    if gap_count <= 0:
+                        continue
+                    if is_night_hour(hour, night_start_hour):
+                        night_gap_sum += gap_sum
+                        night_gap_count += gap_count
+                        night_gap_max = gap_max if night_gap_max is None else max(night_gap_max, gap_max)
+                    else:
+                        day_gap_sum += gap_sum
+                        day_gap_count += gap_count
+                        day_gap_max = gap_max if day_gap_max is None else max(day_gap_max, gap_max)
+
+                day_gap_max_points.append(day_gap_max)
+                day_gap_avg_points.append(day_gap_sum / day_gap_count if day_gap_count > 0 else None)
+                night_gap_max_points.append(night_gap_max)
+                night_gap_avg_points.append(night_gap_sum / night_gap_count if night_gap_count > 0 else None)
+
             day_daily_display, day_cumulative_display = _trim_milk_series(
                 day_daily_points, day_cumulative_points
             )
@@ -659,14 +768,31 @@ def milk_totals_by_day(events, child_map):
                 night_daily_display = [None] * len(labels)
                 night_cumulative_display = [None] * len(labels)
 
+            day_gap_max_display = _trim_optional_series(day_gap_max_points, decimals=2)
+            day_gap_avg_display = _trim_optional_series(day_gap_avg_points, decimals=2)
+            night_gap_max_display = _trim_optional_series(night_gap_max_points, decimals=2)
+            night_gap_avg_display = _trim_optional_series(night_gap_avg_points, decimals=2)
+            if day_gap_max_display is None:
+                day_gap_max_display = [None] * len(labels)
+            if day_gap_avg_display is None:
+                day_gap_avg_display = [None] * len(labels)
+            if night_gap_max_display is None:
+                night_gap_max_display = [None] * len(labels)
+            if night_gap_avg_display is None:
+                night_gap_avg_display = [None] * len(labels)
+
             split[str(night_start_hour)] = {
                 "day": {
                     "daily": day_daily_display,
                     "cumulative": day_cumulative_display,
+                    "maxGap": day_gap_max_display,
+                    "avgGap": day_gap_avg_display,
                 },
                 "night": {
                     "daily": night_daily_display,
                     "cumulative": night_cumulative_display,
+                    "maxGap": night_gap_max_display,
+                    "avgGap": night_gap_avg_display,
                 },
             }
 
@@ -675,6 +801,8 @@ def milk_totals_by_day(events, child_map):
                 "label": child_map.get(child_key) or child_key,
                 "daily": daily_display,
                 "cumulative": cumulative_display,
+                "maxGap": max_gap_display,
+                "avgGap": avg_gap_display,
                 "split": split,
                 "borderColor": palette[idx % len(palette)],
                 "backgroundColor": palette[idx % len(palette)],
@@ -689,7 +817,7 @@ def milk_totals_by_day(events, child_map):
     }
 
 
-def build_milk_html(events, child_map, generated_at):
+def build_plot_html(events, child_map, generated_at):
     chart_data = milk_totals_by_day(events, child_map)
     chart_data_json = json.dumps(chart_data, separators=(",", ":"))
     generated = time.strftime("%Y-%m-%d %H:%M", time.localtime(generated_at / 1000))
@@ -831,6 +959,39 @@ def build_milk_html(events, child_map, generated_at):
       return Array.isArray(values) && values.some((value) => value != null);
     }}
 
+    function isMilkMode(plotMode) {{
+      return plotMode === "milk-daily" || plotMode === "milk-cumulative";
+    }}
+
+    function isCumulativeMode(plotMode) {{
+      return plotMode === "milk-cumulative";
+    }}
+
+    function isSmoothable(plotMode) {{
+      return plotMode !== "milk-cumulative";
+    }}
+
+    function plotModeLabel(plotMode) {{
+      if (plotMode === "milk-cumulative") {{
+        return "cumulative milk";
+      }}
+      if (plotMode === "gap-max") {{
+        return "max gap";
+      }}
+      if (plotMode === "gap-avg") {{
+        return "avg gap";
+      }}
+      return "daily milk";
+    }}
+
+    function plotUnit(plotMode) {{
+      return isMilkMode(plotMode) ? "mL" : "h";
+    }}
+
+    function plotValueDecimals(plotMode) {{
+      return isMilkMode(plotMode) ? 1 : 2;
+    }}
+
     function movingAverage(values, windowSize, partialDayIndex) {{
       if (windowSize <= 1) {{
         return values.slice();
@@ -861,25 +1022,47 @@ def build_milk_html(events, child_map, generated_at):
       return output;
     }}
 
-    function splitSeriesValues(entry, mode, nightStartHour, period) {{
+    function splitSeriesValues(entry, plotMode, nightStartHour, period) {{
       const splitByHour = entry.split || {{}};
       const split = splitByHour[String(nightStartHour)] || null;
       if (!split || !split[period]) {{
         return [];
       }}
-      return mode === "cumulative" ? (split[period].cumulative || []) : (split[period].daily || []);
+      if (plotMode === "milk-cumulative") {{
+        return split[period].cumulative || [];
+      }}
+      if (plotMode === "gap-max") {{
+        return split[period].maxGap || [];
+      }}
+      if (plotMode === "gap-avg") {{
+        return split[period].avgGap || [];
+      }}
+      return split[period].daily || [];
     }}
 
-    function buildDatasets(mode, smoothWindow, splitEnabled, nightStartHour) {{
+    function modeSeriesValues(entry, plotMode) {{
+      if (plotMode === "milk-cumulative") {{
+        return entry.cumulative || [];
+      }}
+      if (plotMode === "gap-max") {{
+        return entry.maxGap || [];
+      }}
+      if (plotMode === "gap-avg") {{
+        return entry.avgGap || [];
+      }}
+      return entry.daily || [];
+    }}
+
+    function buildDatasets(plotMode, smoothWindow, splitEnabled, nightStartHour) {{
       const datasets = [];
       series.forEach((entry) => {{
         if (!splitEnabled) {{
-          const raw = mode === "cumulative" ? entry.cumulative : entry.daily;
-          const data = mode === "daily" ? movingAverage(raw, smoothWindow, todayIndex) : raw;
+          const raw = modeSeriesValues(entry, plotMode);
+          const data = isSmoothable(plotMode) ? movingAverage(raw, smoothWindow, todayIndex) : raw;
           if (!hasAnyValue(data)) {{
             return;
           }}
-          const customKey = `single:${{entry.label}}`;
+          const customKey = `single:${{plotMode}}:${{entry.label}}`;
           datasets.push({{
             label: entry.label,
             customKey,
@@ -901,12 +1084,12 @@ def build_milk_html(events, child_map, generated_at):
           {{ period: "night", label: "Night", dash: [8, 5] }},
         ];
         periodSpecs.forEach((spec) => {{
-          const raw = splitSeriesValues(entry, mode, nightStartHour, spec.period);
-          const data = mode === "daily" ? movingAverage(raw, smoothWindow, todayIndex) : raw;
+          const raw = splitSeriesValues(entry, plotMode, nightStartHour, spec.period);
+          const data = isSmoothable(plotMode) ? movingAverage(raw, smoothWindow, todayIndex) : raw;
           if (!hasAnyValue(data)) {{
             return;
           }}
-          const customKey = `split:${{entry.label}}:${{spec.period}}`;
+          const customKey = `split:${{plotMode}}:${{entry.label}}:${{spec.period}}`;
           datasets.push({{
             label: `${{entry.label}} (${{spec.label}})`,
             customKey,
@@ -926,14 +1109,21 @@ def build_milk_html(events, child_map, generated_at):
       return datasets;
     }}
 
-    function yAxisTitle(mode, smoothWindow, splitEnabled, nightStartHour) {{
+    function yAxisTitle(plotMode, smoothWindow, splitEnabled, nightStartHour) {{
       let baseTitle = "";
-      if (mode === "cumulative") {{
+      if (plotMode === "milk-cumulative") {{
         baseTitle = "Cumulative milk eaten (mL)";
+      }} else if (plotMode === "gap-max") {{
+        baseTitle = "Max feeding gap per day (hours)";
+      }} else if (plotMode === "gap-avg") {{
+        baseTitle = "Average feeding gap per day (hours)";
       }} else if (smoothWindow <= 1) {{
         baseTitle = "Milk eaten per day (mL)";
       }} else {{
         baseTitle = `Milk eaten per day (mL, ${{smoothWindow}}-day moving avg)`;
+      }}
+      if (plotMode !== "milk-cumulative" && !isMilkMode(plotMode) && smoothWindow > 1) {{
+        baseTitle = `${{baseTitle}} (${{smoothWindow}}-day moving avg)`;
       }}
       if (!splitEnabled) {{
         return baseTitle;
@@ -941,8 +1131,8 @@ def build_milk_html(events, child_map, generated_at):
       return `${{baseTitle}} (Day/Night split, night ${{splitWindowText(nightStartHour)}})`;
     }}
 
-    function smoothingText(mode, smoothWindow) {{
-      if (mode !== "daily") {{
+    function smoothingText(plotMode, smoothWindow) {{
+      if (!isSmoothable(plotMode)) {{
         return "Smoothing disabled in cumulative mode";
       }}
       if (smoothWindow <= 1) {{
@@ -1002,18 +1192,19 @@ def build_milk_html(events, child_map, generated_at):
       textEl.textContent = `Visible range: ${{labels[minIdx]}} to ${{labels[maxIdx]}}`;
     }}
 
-    function updateControlStates(mode, splitEnabled, modeSelect, smoothSlider, splitToggle, nightStartSelect) {{
+    function updateControlStates(plotMode, splitEnabled, modeSelect, smoothSlider, splitToggle, nightStartSelect) {{
       if (modeSelect) {{
         modeSelect.disabled = false;
       }}
       if (smoothSlider) {{
-        smoothSlider.disabled = mode !== "daily";
+        smoothSlider.disabled = !isSmoothable(plotMode);
       }}
+      const splitAvailable = true;
       if (splitToggle) {{
-        splitToggle.disabled = false;
+        splitToggle.disabled = !splitAvailable;
       }}
       if (nightStartSelect) {{
-        nightStartSelect.disabled = !splitEnabled;
+        nightStartSelect.disabled = !(splitAvailable && splitEnabled);
       }}
     }}
 
@@ -1067,10 +1258,10 @@ def build_milk_html(events, child_map, generated_at):
       if (nightStartSelect) {{
         nightStartSelect.disabled = true;
       }}
-      updateSmoothingLabel("daily", 1);
+      updateSmoothingLabel("milk-daily", 1);
       updateSplitLabel(false, defaultNightStart);
     }} else {{
-      const initialMode = "daily";
+      const initialMode = "milk-daily";
       const initialSmoothWindow = 1;
       const initialSplitEnabled = false;
       const initialNightStart = defaultNightStart;
@@ -1112,11 +1303,13 @@ def build_milk_html(events, child_map, generated_at):
               callbacks: {{
                 title: (items) => tooltipTitle(items),
                 label: (context) => {{
-                  const mode = context.chart.$mode === "cumulative" ? "cumulative" : "daily";
+                  const plotMode = context.chart.$mode || "milk-daily";
                   const windowSize = context.chart.$smoothWindow || 1;
-                  const smoothSuffix = mode === "daily" && windowSize > 1 ? `, ${{windowSize}}d MA` : "";
+                  const smoothSuffix = isSmoothable(plotMode) && windowSize > 1 ? `, ${{windowSize}}d MA` : "";
                   const splitSuffix = context.chart.$splitEnabled ? ", split" : "";
-                  return `${{context.dataset.label}}: ${{context.parsed.y.toFixed(1)}} mL (${{mode}}${{smoothSuffix}}${{splitSuffix}})`;
+                  const unit = plotUnit(plotMode);
+                  const decimals = plotValueDecimals(plotMode);
+                  return `${{context.dataset.label}}: ${{context.parsed.y.toFixed(decimals)}} ${{unit}} (${{plotModeLabel(plotMode)}}${{smoothSuffix}}${{splitSuffix}})`;
                 }},
               }},
             }},
@@ -1181,7 +1374,7 @@ def build_milk_html(events, child_map, generated_at):
       if (!chart) {{
         return;
       }}
-      const mode = chart.$mode || "daily";
+      const mode = chart.$mode || "milk-daily";
       const smoothWindow = chart.$smoothWindow || 1;
       const splitEnabled = currentSplitEnabled();
       const nightStart = currentNightStart();
@@ -1202,7 +1395,7 @@ def build_milk_html(events, child_map, generated_at):
         if (!chart) {{
           return;
         }}
-        chart.$mode = event.target.value === "cumulative" ? "cumulative" : "daily";
+        chart.$mode = event.target.value || "milk-daily";
         refreshChart();
       }});
     }}
@@ -1211,7 +1404,7 @@ def build_milk_html(events, child_map, generated_at):
       smoothSlider.addEventListener("input", (event) => {{
         const nextWindow = Math.max(1, Number.parseInt(event.target.value, 10) || 1);
         if (!chart) {{
-          updateSmoothingLabel("daily", nextWindow);
+          updateSmoothingLabel("milk-daily", nextWindow);
           return;
         }}
         chart.$smoothWindow = nextWindow;
@@ -1251,7 +1444,7 @@ def build_milk_html(events, child_map, generated_at):
 <head>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>Nara Milk Totals</title>
+  <title>Nara Plots</title>
   <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\" />
   <style>
     {css}
@@ -1259,13 +1452,15 @@ def build_milk_html(events, child_map, generated_at):
 </head>
 <body>
   <div class=\"container\">
-    <h1>Milk Totals</h1>
-    <p class=\"subtitle\">Showing daily totals by default. Toggle Day/Night split to compare 12-hour windows; choose when night starts (default 20:00). Drag horizontally to zoom; hold Shift and drag to pan.</p>
+    <h1>Plots</h1>
+    <p class=\"subtitle\">Choose a plot (milk totals or feeding gaps). Day/Night split uses a 12-hour night window from the selected start time (default 20:00). Drag horizontally to zoom; hold Shift and drag to pan.</p>
     <div class=\"actions\">
       <a class=\"btn\" href=\"/\">Back to Main View</a>
       <select id=\"series-mode\" class=\"mode-select\" aria-label=\"Series mode\">
-        <option value=\"daily\" selected>Daily Total</option>
-        <option value=\"cumulative\">Cumulative Total</option>
+        <option value=\"milk-daily\" selected>Daily Milk Total</option>
+        <option value=\"milk-cumulative\">Cumulative Milk Total</option>
+        <option value=\"gap-max\">Max Feeding Gap</option>
+        <option value=\"gap-avg\">Average Feeding Gap</option>
       </select>
       <label class=\"toggle-label\" for=\"split-day-night\">
         <input id=\"split-day-night\" type=\"checkbox\" />
@@ -1287,7 +1482,7 @@ def build_milk_html(events, child_map, generated_at):
     <div class=\"chart-wrap\">
       <canvas id=\"milk-chart\"></canvas>
     </div>
-    <div id=\"no-data\" class=\"subtitle\" hidden>No bottle milk data found yet.</div>
+    <div id=\"no-data\" class=\"subtitle\" hidden>No plot data found yet.</div>
     <div class=\"meta\">as of {html.escape(generated)}</div>
     {warn_html}
   </div>
@@ -1344,7 +1539,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if parsed.path not in ("/", "/index.html", "/json", "/milk", "/milk.html"):
+        if parsed.path in ("/milk", "/milk.html"):
+            self.send_response(302)
+            self.send_header("Location", "/plot")
+            self.end_headers()
+            return
+        if parsed.path not in ("/", "/index.html", "/json", "/plot", "/plot.html"):
             self.send_response(404)
             self.end_headers()
             return
@@ -1373,8 +1573,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body_bytes)
                 return
 
-            if parsed.path in ("/milk", "/milk.html"):
-                html_body = build_milk_html(
+            if parsed.path in ("/plot", "/plot.html"):
+                html_body = build_plot_html(
                     data.get("events", []),
                     data.get("children", {}),
                     generated_at,
