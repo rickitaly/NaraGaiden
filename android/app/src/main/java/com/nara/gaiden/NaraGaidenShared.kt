@@ -11,8 +11,21 @@ data class NaraGaidenRow(
     val feedBeginDt: Long?,
     val diaperLabel: String,
     val diaperBeginDt: Long?,
-    val vitaminsToday: Boolean
-)
+    val vitaminsTodayCount: Int,
+    val medicationTodayCount: Int
+) {
+    val displayName: String
+        get() {
+            val indicators = buildString {
+                repeat(vitaminsTodayCount.coerceAtLeast(0)) { append("💊") }
+                repeat(medicationTodayCount.coerceAtLeast(0)) { append("💉") }
+            }
+            if (indicators.isEmpty()) {
+                return name
+            }
+            return "$name $indicators"
+        }
+}
 
 object NaraGaidenStore {
     const val PREFS_NAME = "nara_gaiden_widget"
@@ -39,7 +52,28 @@ object NaraGaidenContent {
                     feedBeginDt = feed?.optLong("beginDt", 0L)?.takeIf { it > 0 },
                     diaperLabel = diaper?.optString("label", "unknown") ?: "unknown",
                     diaperBeginDt = diaper?.optLong("beginDt", 0L)?.takeIf { it > 0 },
-                    vitaminsToday = child.optBoolean("vitaminsToday", false)
+                    vitaminsTodayCount = (
+                        if (child.has("vitaminsToday")) {
+                            child.optInt("vitaminsToday", 0)
+                        } else if (child.has("vitaminsTodayCount")) {
+                            child.optInt("vitaminsTodayCount", 0)
+                        } else if (child.optBoolean("vitaminsToday", false)) {
+                            1
+                        } else {
+                            0
+                        }
+                    ).coerceAtLeast(0),
+                    medicationTodayCount = (
+                        if (child.has("medicationToday")) {
+                            child.optInt("medicationToday", 0)
+                        } else if (child.has("medicationTodayCount")) {
+                            child.optInt("medicationTodayCount", 0)
+                        } else if (child.optBoolean("medicationToday", false)) {
+                            1
+                        } else {
+                            0
+                        }
+                    ).coerceAtLeast(0)
                 )
             )
         }

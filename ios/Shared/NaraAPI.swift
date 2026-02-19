@@ -32,7 +32,8 @@ struct NaraPayload: Codable {
                         label: "Wet",
                         beginDt: nowMs - 55 * 60 * 1000
                     ),
-                    vitaminsToday: true
+                    vitaminsToday: 2,
+                    medicationToday: 1
                 )
             ]
         )
@@ -44,13 +45,18 @@ struct NaraChild: Codable, Identifiable {
     let name: String
     let feed: NaraEvent
     let diaper: NaraEvent
-    let vitaminsToday: Bool?
+    let vitaminsToday: Int?
+    let medicationToday: Int?
 
     var displayName: String {
-        if vitaminsToday == true {
-            return "\(name) 💊"
+        let vitaminCount = max(vitaminsToday ?? 0, 0)
+        let medicationCount = max(medicationToday ?? 0, 0)
+        let indicators = String(repeating: "💊", count: max(vitaminCount, 0))
+            + String(repeating: "💉", count: max(medicationCount, 0))
+        if indicators.isEmpty {
+            return name
         }
-        return name
+        return "\(name) \(indicators)"
     }
 }
 

@@ -23,7 +23,9 @@ struct NaraAppPreview: View {
                     Text(child.displayName)
                         .font(.headline)
                         .frame(width: nameWidth, alignment: .leading)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                         .minimumScaleFactor(0.7)
 
                     VStack(alignment: .leading, spacing: 6) {

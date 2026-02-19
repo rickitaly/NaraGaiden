@@ -118,17 +118,19 @@ def local_midnight_ms(now_ms=None):
     return int(midnight_sec * 1000)
 
 
-def vitamins_today(events, now_ms=None):
+def routine_counts_today(events, keywords, now_ms=None):
     if now_ms is None:
         now_ms = int(time.time() * 1000)
     midnight_ms = local_midnight_ms(now_ms)
+    normalized_keywords = [str(keyword).lower() for keyword in keywords]
     result = {}
     for ev in events:
         if ev.get("trackGroupKey") != "ROUTINE":
             continue
         payload = ev.get("payload") or {}
         name = payload.get("routineName") or ""
-        if "vitamin" not in str(name).lower():
+        routine_name = str(name).lower()
+        if not any(keyword in routine_name for keyword in normalized_keywords):
             continue
         begin = ev.get("beginDt")
         if begin is None or int(begin) < midnight_ms:
@@ -136,7 +138,7 @@ def vitamins_today(events, now_ms=None):
         child_key = ev.get("childKey")
         if not child_key:
             continue
-        result[child_key] = True
+        result[child_key] = result.get(child_key, 0) + 1
     return result
 
 
@@ -236,10 +238,12 @@ def diaper_label(ev):
     return "/".join(parts) if parts else "Diaper"
 
 
-def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=None):
+def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=None, medications=None):
     now_ms = int(time.time() * 1000)
     if vitamins is None:
         vitamins = {}
+    if medications is None:
+        medications = {}
     rows = []
     child_keys = sorted(
         ## Skip babies with no latest feed (dogs):
@@ -251,8 +255,11 @@ def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
     for child_key in child_keys:
         name = child_map.get(child_key) or child_key
         name_html = html.escape(name)
-        if vitamins.get(child_key):
-            name_html += " &#128138;"
+        vitamin_count = int(vitamins.get(child_key, 0) or 0)
+        medication_count = int(medications.get(child_key, 0) or 0)
+        indicators = ("&#128138;" * vitamin_count) + ("&#128137;" * medication_count)
+        if indicators:
+            name_html += f" {indicators}"
         feed_ev = latest_feed.get(child_key)
         diaper_ev = latest_diaper.get(child_key)
         feed_when = format_relative(feed_ev.get("beginDt"), now_ms) if feed_ev else "unknown"
@@ -303,8 +310,16 @@ def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
     """.strip()
 
 
-def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="", vitamins=None):
-    body_html = build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins)
+def build_html(
+    latest_feed,
+    latest_diaper,
+    child_map,
+    generated_at,
+    body_class="",
+    vitamins=None,
+    medications=None,
+):
+    body_html = build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins, medications)
     css = (GLOBAL_CSS + """
     @view-transition { navigation: auto; }
     body {
@@ -464,9 +479,11 @@ def build_html(latest_feed, latest_diaper, child_map, generated_at, body_class="
 
 
 
-def build_json(latest_feed, latest_diaper, child_map, generated_at, vitamins=None):
+def build_json(latest_feed, latest_diaper, child_map, generated_at, vitamins=None, medications=None):
     if vitamins is None:
         vitamins = {}
+    if medications is None:
+        medications = {}
     child_keys = sorted(
         latest_feed.keys(),
         key=lambda key: (child_map.get(key) or key),
@@ -476,11 +493,14 @@ def build_json(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
         name = child_map.get(child_key) or child_key
         feed_ev = latest_feed.get(child_key)
         diaper_ev = latest_diaper.get(child_key)
+        vitamin_count = int(vitamins.get(child_key, 0) or 0)
+        medication_count = int(medications.get(child_key, 0) or 0)
         children.append(
             {
                 "id": child_key,
                 "name": name,
-                "vitaminsToday": bool(vitamins.get(child_key)),
+                "vitaminsToday": vitamin_count,
+                "medicationToday": medication_count,
                 "feed": {
                     "label": feed_label(feed_ev) if feed_ev else "unknown",
                     "beginDt": feed_ev.get("beginDt") if feed_ev else None,
@@ -1555,7 +1575,8 @@ class Handler(BaseHTTPRequestHandler):
             latest_feed = latest_by_group(data.get("events", []), "FEED")
             latest_diaper = latest_by_group(data.get("events", []), "DIAPER")
             generated_at = data.get("generatedAt", int(time.time() * 1000))
-            vitamins = vitamins_today(data.get("events", []))
+            vitamins = routine_counts_today(data.get("events", []), ["vitamin"])
+            medications = routine_counts_today(data.get("events", []), ["medication", "medicine"])
             if parsed.path == "/json":
                 payload = build_json(
                     latest_feed,
@@ -1563,6 +1584,7 @@ class Handler(BaseHTTPRequestHandler):
                     data.get("children", {}),
                     generated_at,
                     vitamins,
+                    medications,
                 )
                 body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
                 self.send_response(200)
@@ -1597,6 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
                 generated_at,
                 body_class,
                 vitamins,
+                medications,
             )
             body_bytes = html_body.encode("utf-8")
             self.send_response(200)

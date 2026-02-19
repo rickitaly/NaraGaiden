@@ -142,8 +142,7 @@ class MainActivity : AppCompatActivity() {
             val diaperLabelView = rowView.findViewById<TextView>(R.id.app_row_diaper_label)
             val diaperWhenView = rowView.findViewById<TextView>(R.id.app_row_diaper_when)
 
-            val name = if (row.vitaminsToday) "${row.name} 💊" else row.name
-            nameView.text = name
+            nameView.text = row.displayName
             feedLabelView.text = row.feedLabel
             feedWhenView.text = NaraGaidenFormat.formatRelative(row.feedBeginDt)
             diaperLabelView.text = row.diaperLabel

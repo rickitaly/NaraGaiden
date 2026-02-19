@@ -128,7 +128,9 @@ struct NaraGaidenLockWidgetEntryView: View {
                                 .font(nameFont)
                                 .fontWeight(.semibold)
                                 .frame(width: babyWidth, alignment: .leading)
-                                .lineLimit(1)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
                                 .minimumScaleFactor(0.7)
 
                             Text(feedDetailLabel(child.feed.label))
@@ -146,7 +148,9 @@ struct NaraGaidenLockWidgetEntryView: View {
                                 .font(nameFont)
                                 .fontWeight(.semibold)
                                 .frame(width: babyWidth, alignment: .leading)
-                                .lineLimit(1)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
                                 .minimumScaleFactor(0.7)
 
                             VStack(alignment: .leading, spacing: detailSpacing) {

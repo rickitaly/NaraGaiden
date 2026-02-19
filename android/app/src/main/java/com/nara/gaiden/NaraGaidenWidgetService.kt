@@ -38,8 +38,7 @@ class NaraGaidenWidgetFactory(private val context: Context) : RemoteViewsService
     override fun getViewAt(position: Int): RemoteViews {
         val row = rows[position]
         val views = RemoteViews(context.packageName, R.layout.widget_row)
-        val name = if (row.vitaminsToday) "${row.name} 💊" else row.name
-        views.setTextViewText(R.id.row_name, name)
+        views.setTextViewText(R.id.row_name, row.displayName)
         views.setTextViewText(R.id.row_feed_label, row.feedLabel)
         views.setTextViewText(
             R.id.row_feed_when,

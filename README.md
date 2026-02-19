@@ -4,7 +4,7 @@ Nara Gaiden is a companion viewer for the
 [Nara Baby tracking app](https://nara.com/pages/nara-baby-tracker-app).
 Nara Gaiden is designed especially for raising multiple babies:
 it lets you quickly see who was fed and changed when,
-and who had their vitamins today.
+and who had vitamins or medication since midnight.
 
 Given that Nara Baby doesn't offer an API,
 Nara Gaiden takes the (rather hacky) approach
@@ -27,8 +27,10 @@ but you might not want to broadcast your babies' data to the Internet.
   * yellow = 2 hours old
   * orange = 3 hours old
   * red = 4+ hours old
-* 💊 indicates vitamins have been fed for the day
-  (based on routine tracking)
+* Name badges show emoji for certain routine tracking, since midnight:
+  * 💊 for vitamins
+  * 💉 for medication
+  * Repeat multiple times if given multiple times in the day
 * Automatically updates every minute
 
 Open with `chrome --app=http://192.168.2.1:8888`
