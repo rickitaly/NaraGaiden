@@ -30,6 +30,7 @@ but you might not want to broadcast your babies' data to the Internet.
 * Name badges show emoji for certain routine tracking, since midnight:
   * 💊 for vitamins
   * 💉 for medication
+  * 🛁 for baths
   * Repeat multiple times if given multiple times in the day
 * Automatically updates every minute
 

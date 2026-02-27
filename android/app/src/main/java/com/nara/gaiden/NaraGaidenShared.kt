@@ -12,13 +12,15 @@ data class NaraGaidenRow(
     val diaperLabel: String,
     val diaperBeginDt: Long?,
     val vitaminsTodayCount: Int,
-    val medicationTodayCount: Int
+    val medicationTodayCount: Int,
+    val bathsTodayCount: Int
 ) {
     val displayName: String
         get() {
             val indicators = buildString {
                 repeat(vitaminsTodayCount.coerceAtLeast(0)) { append("💊") }
                 repeat(medicationTodayCount.coerceAtLeast(0)) { append("💉") }
+                repeat(bathsTodayCount.coerceAtLeast(0)) { append("🛁") }
             }
             if (indicators.isEmpty()) {
                 return name
@@ -69,6 +71,17 @@ object NaraGaidenContent {
                         } else if (child.has("medicationTodayCount")) {
                             child.optInt("medicationTodayCount", 0)
                         } else if (child.optBoolean("medicationToday", false)) {
+                            1
+                        } else {
+                            0
+                        }
+                    ).coerceAtLeast(0),
+                    bathsTodayCount = (
+                        if (child.has("bathsToday")) {
+                            child.optInt("bathsToday", 0)
+                        } else if (child.has("bathsTodayCount")) {
+                            child.optInt("bathsTodayCount", 0)
+                        } else if (child.optBoolean("bathsToday", false)) {
                             1
                         } else {
                             0

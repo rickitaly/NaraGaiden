@@ -238,12 +238,22 @@ def diaper_label(ev):
     return "/".join(parts) if parts else "Diaper"
 
 
-def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=None, medications=None):
+def build_body(
+    latest_feed,
+    latest_diaper,
+    child_map,
+    generated_at,
+    vitamins=None,
+    medications=None,
+    baths=None,
+):
     now_ms = int(time.time() * 1000)
     if vitamins is None:
         vitamins = {}
     if medications is None:
         medications = {}
+    if baths is None:
+        baths = {}
     rows = []
     child_keys = sorted(
         ## Skip babies with no latest feed (dogs):
@@ -257,7 +267,12 @@ def build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
         name_html = html.escape(name)
         vitamin_count = int(vitamins.get(child_key, 0) or 0)
         medication_count = int(medications.get(child_key, 0) or 0)
-        indicators = ("&#128138;" * vitamin_count) + ("&#128137;" * medication_count)
+        bath_count = int(baths.get(child_key, 0) or 0)
+        indicators = (
+            ("&#128138;" * vitamin_count)
+            + ("&#128137;" * medication_count)
+            + ("&#128705;" * bath_count)
+        )
         if indicators:
             name_html += f" {indicators}"
         feed_ev = latest_feed.get(child_key)
@@ -318,8 +333,9 @@ def build_html(
     body_class="",
     vitamins=None,
     medications=None,
+    baths=None,
 ):
-    body_html = build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins, medications)
+    body_html = build_body(latest_feed, latest_diaper, child_map, generated_at, vitamins, medications, baths)
     css = (GLOBAL_CSS + """
     @view-transition { navigation: auto; }
     body {
@@ -479,11 +495,13 @@ def build_html(
 
 
 
-def build_json(latest_feed, latest_diaper, child_map, generated_at, vitamins=None, medications=None):
+def build_json(latest_feed, latest_diaper, child_map, generated_at, vitamins=None, medications=None, baths=None):
     if vitamins is None:
         vitamins = {}
     if medications is None:
         medications = {}
+    if baths is None:
+        baths = {}
     child_keys = sorted(
         latest_feed.keys(),
         key=lambda key: (child_map.get(key) or key),
@@ -495,12 +513,14 @@ def build_json(latest_feed, latest_diaper, child_map, generated_at, vitamins=Non
         diaper_ev = latest_diaper.get(child_key)
         vitamin_count = int(vitamins.get(child_key, 0) or 0)
         medication_count = int(medications.get(child_key, 0) or 0)
+        bath_count = int(baths.get(child_key, 0) or 0)
         children.append(
             {
                 "id": child_key,
                 "name": name,
                 "vitaminsToday": vitamin_count,
                 "medicationToday": medication_count,
+                "bathsToday": bath_count,
                 "feed": {
                     "label": feed_label(feed_ev) if feed_ev else "unknown",
                     "beginDt": feed_ev.get("beginDt") if feed_ev else None,
@@ -1577,6 +1597,7 @@ class Handler(BaseHTTPRequestHandler):
             generated_at = data.get("generatedAt", int(time.time() * 1000))
             vitamins = routine_counts_today(data.get("events", []), ["vitamin"])
             medications = routine_counts_today(data.get("events", []), ["medication", "medicine"])
+            baths = routine_counts_today(data.get("events", []), ["bath"])
             if parsed.path == "/json":
                 payload = build_json(
                     latest_feed,
@@ -1585,6 +1606,7 @@ class Handler(BaseHTTPRequestHandler):
                     generated_at,
                     vitamins,
                     medications,
+                    baths,
                 )
                 body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
                 self.send_response(200)
@@ -1620,6 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
                 body_class,
                 vitamins,
                 medications,
+                baths,
             )
             body_bytes = html_body.encode("utf-8")
             self.send_response(200)
