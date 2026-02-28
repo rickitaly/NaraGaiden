@@ -372,6 +372,7 @@ def build_html(
       background: #141414;
       color: #f2f2f2;
       padding: 8px 12px;
+      font-family: var(--font-body);
       font-size: clamp(12px, 1vw + 6px, 16px);
       border-radius: 6px;
       cursor: pointer;
